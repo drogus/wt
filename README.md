@@ -21,7 +21,7 @@ your `PATH`.
 Add the following to your `~/.bashrc` or `~/.zshrc`:
 
 ```sh
-eval "$(wt --shell-init)"
+eval "$(command wt --shell-init)"
 ```
 
 Run `wt --shell-init` to see what the function looks like.
