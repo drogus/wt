@@ -621,8 +621,12 @@ wt() {{
     local target
     target=$(command wt "$@")
     local code=$?
-    if [ $code -eq 0 ] && [ -n "$target" ] && [ -d "$target" ]; then
-        cd "$target"
+    if [ $code -eq 0 ] && [ -n "$target" ]; then
+        if [ -d "$target" ]; then
+            cd "$target"
+        else
+            echo "$target"
+        fi
     fi
     return $code
 }}
