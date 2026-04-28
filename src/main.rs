@@ -5,6 +5,52 @@ use clap::{CommandFactory, Parser, Subcommand};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use inquire::{Confirm, Select};
+use serde::Deserialize;
+
+#[derive(Deserialize, Default)]
+struct WtConfig {
+    #[serde(default)]
+    symlinks: Vec<String>,
+}
+
+fn read_config(main_repo: &Path) -> WtConfig {
+    let path = main_repo.join(".wt.toml");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return WtConfig::default();
+    };
+    match toml::from_str::<WtConfig>(&contents) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Warning: failed to parse .wt.toml: {e}");
+            WtConfig::default()
+        }
+    }
+}
+
+fn apply_symlinks(main_repo: &Path, worktree: &Path, entries: &[String]) {
+    for entry in entries {
+        let src = main_repo.join(entry);
+        let dest = worktree.join(entry);
+
+        if !src.exists() {
+            eprintln!("Warning: symlink source missing in main repo: {entry}");
+            continue;
+        }
+        if dest.exists() || dest.is_symlink() {
+            eprintln!("Warning: skipping symlink, destination already exists: {entry}");
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("Warning: could not create parent for {entry}: {e}");
+                continue;
+            }
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&src, &dest) {
+            eprintln!("Warning: failed to symlink {entry}: {e}");
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "wt", about = "Git worktree manager", disable_help_flag = true)]
@@ -267,6 +313,8 @@ fn create_worktree(main_repo: &Path, branch: &str, base: &str) -> Result<PathBuf
     .map_err(|e| format!("Failed to run git: {e}"))?;
 
     if output.status.success() {
+        let config = read_config(main_repo);
+        apply_symlinks(main_repo, &worktree_path, &config.symlinks);
         Ok(worktree_path)
     } else {
         Err(format!(

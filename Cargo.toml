@@ -7,3 +7,5 @@ edition = "2024"
 clap = { version = "4", features = ["derive"] }
 inquire = "0.9"
 fuzzy-matcher = "0.3"
+toml = "1.1.2"
+serde = { version = "1.0.228", features = ["derive"] }
