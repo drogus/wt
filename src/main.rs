@@ -13,6 +13,47 @@ struct WtConfig {
     symlinks: Vec<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct GlobalConfig {
+    #[serde(default)]
+    repos: Vec<String>,
+}
+
+fn global_config_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".config/wt/config.toml"))
+}
+
+fn expand_tilde(p: &str) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    if p == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(p)
+}
+
+fn read_global_config() -> GlobalConfig {
+    let Some(path) = global_config_path() else {
+        return GlobalConfig::default();
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return GlobalConfig::default();
+    };
+    match toml::from_str::<GlobalConfig>(&contents) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            GlobalConfig::default()
+        }
+    }
+}
+
 fn read_config(main_repo: &Path) -> WtConfig {
     let path = main_repo.join(".wt.toml");
     let Ok(contents) = std::fs::read_to_string(&path) else {
@@ -77,6 +118,10 @@ struct Cli {
     /// Do not create or switch tmux sessions
     #[arg(short = 'n', long = "no-session")]
     no_session: bool,
+
+    /// Show worktrees from all repos in ~/.config/wt/config.toml
+    #[arg(short = 'g', long = "global")]
+    global: bool,
 
     /// Print help
     #[arg(short = 'h', long = "help")]
@@ -652,6 +697,79 @@ fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+fn handle_tmux_switch(repo_name: &str, branch: &str, path: &Path, no_session: bool) -> bool {
+    if no_session || !is_in_tmux() {
+        return false;
+    }
+    let session = tmux_session_name(repo_name, branch);
+    let already_here = current_tmux_session().as_deref() == Some(session.as_str());
+    match ensure_and_switch_tmux_session(&session, path) {
+        Ok(()) => !already_here,
+        Err(e) => {
+            eprintln!("Warning: {e}");
+            false
+        }
+    }
+}
+
+fn run_global_mode(no_session: bool) {
+    let cfg = read_global_config();
+    if cfg.repos.is_empty() {
+        die("Not in a git repo and no repos configured in ~/.config/wt/config.toml");
+    }
+
+    struct Entry {
+        label: String,
+        repo_name: String,
+        branch: String,
+        path: PathBuf,
+    }
+
+    let mut entries: Vec<Entry> = vec![];
+    for repo_path_str in &cfg.repos {
+        let repo_path = expand_tilde(repo_path_str);
+        let repo_name = repo_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo")
+            .to_string();
+
+        match list_worktrees(&repo_path) {
+            Ok(wts) => {
+                for w in wts {
+                    entries.push(Entry {
+                        label: format!("{repo_name}: {}", w.branch),
+                        repo_name: repo_name.clone(),
+                        branch: w.branch,
+                        path: w.path,
+                    });
+                }
+            }
+            Err(e) => eprintln!("Warning: {}: {e}", repo_path.display()),
+        }
+    }
+
+    if entries.is_empty() {
+        die("No worktrees found in any configured repo.");
+    }
+
+    let labels: Vec<String> = entries.iter().map(|e| e.label.clone()).collect();
+    let selected = Select::new("Select a worktree:", labels)
+        .with_scorer(&fuzzy_scorer)
+        .prompt();
+
+    match selected {
+        Ok(label) => {
+            if let Some(e) = entries.iter().find(|e| e.label == label) {
+                if !handle_tmux_switch(&e.repo_name, &e.branch, &e.path, no_session) {
+                    println!("{}", e.path.display());
+                }
+            }
+        }
+        Err(_) => std::process::exit(1),
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -683,7 +801,25 @@ wt() {{
         return;
     }
 
-    let main_repo = get_main_repo_root().unwrap_or_else(|e| die(&e));
+    if cli.global {
+        run_global_mode(cli.no_session);
+        return;
+    }
+
+    let main_repo = match get_main_repo_root() {
+        Ok(p) => p,
+        Err(e) => {
+            let interactive = cli.branch.is_none()
+                && !cli.create
+                && !cli.remove
+                && cli.command.is_none();
+            if interactive {
+                run_global_mode(cli.no_session);
+                return;
+            }
+            die(&e);
+        }
+    };
     let repo_name = main_repo
         .file_name()
         .and_then(|n| n.to_str())
