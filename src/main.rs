@@ -677,11 +677,17 @@ wt() {{
     };
 
     // Helper: handle tmux after resolving a worktree path.
-    let handle_tmux = |branch: &str, path: &Path| {
-        if !cli.no_session {
-            let session = tmux_session_name(&repo_name, branch);
-            if let Err(e) = ensure_and_switch_tmux_session(&session, path) {
+    // Returns true if a tmux session switch happened (so the caller should skip cd).
+    let handle_tmux = |branch: &str, path: &Path| -> bool {
+        if cli.no_session || !is_in_tmux() {
+            return false;
+        }
+        let session = tmux_session_name(&repo_name, branch);
+        match ensure_and_switch_tmux_session(&session, path) {
+            Ok(()) => true,
+            Err(e) => {
                 eprintln!("Warning: {e}");
+                false
             }
         }
     };
@@ -695,8 +701,9 @@ wt() {{
         let base = resolve_base();
         match create_worktree(&main_repo, branch, &base) {
             Ok(path) => {
-                handle_tmux(branch, &path);
-                println!("{}", path.display());
+                if !handle_tmux(branch, &path) {
+                    println!("{}", path.display());
+                }
             }
             Err(e) => die(&e),
         }
@@ -744,8 +751,9 @@ wt() {{
 
         match worktrees.iter().find(|w| &w.branch == branch) {
             Some(wt) => {
-                handle_tmux(branch, &wt.path);
-                println!("{}", wt.path.display());
+                if !handle_tmux(branch, &wt.path) {
+                    println!("{}", wt.path.display());
+                }
             }
             None => {
                 eprintln!("No worktree found for branch '{branch}'.");
@@ -761,8 +769,9 @@ wt() {{
                 let base = resolve_base();
                 match create_worktree(&main_repo, branch, &base) {
                     Ok(path) => {
-                        handle_tmux(branch, &path);
-                        println!("{}", path.display());
+                        if !handle_tmux(branch, &path) {
+                            println!("{}", path.display());
+                        }
                     }
                     Err(e) => die(&e),
                 }
@@ -785,8 +794,9 @@ wt() {{
         match selected {
             Ok(branch) => {
                 if let Some(wt) = worktrees.iter().find(|w| w.branch == branch) {
-                    handle_tmux(&branch, &wt.path);
-                    println!("{}", wt.path.display());
+                    if !handle_tmux(&branch, &wt.path) {
+                        println!("{}", wt.path.display());
+                    }
                 }
             }
             Err(_) => std::process::exit(1),
