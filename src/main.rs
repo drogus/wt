@@ -677,14 +677,15 @@ wt() {{
     };
 
     // Helper: handle tmux after resolving a worktree path.
-    // Returns true if a tmux session switch happened (so the caller should skip cd).
+    // Returns true if we switched to a different tmux session (so the caller should skip cd).
     let handle_tmux = |branch: &str, path: &Path| -> bool {
         if cli.no_session || !is_in_tmux() {
             return false;
         }
         let session = tmux_session_name(&repo_name, branch);
+        let already_here = current_tmux_session().as_deref() == Some(session.as_str());
         match ensure_and_switch_tmux_session(&session, path) {
-            Ok(()) => true,
+            Ok(()) => !already_here,
             Err(e) => {
                 eprintln!("Warning: {e}");
                 false
