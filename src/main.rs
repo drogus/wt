@@ -146,6 +146,8 @@ enum Commands {
         /// Branch to destroy (defaults to current branch)
         branch: Option<String>,
     },
+    /// Create tmux sessions for every worktree in every configured repo
+    Sessions,
 }
 
 struct Worktree {
@@ -412,6 +414,26 @@ fn tmux_session_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Create the tmux session (detached) if it doesn't exist.
+/// Returns true if a new session was created, false if it already existed.
+fn ensure_tmux_session(name: &str, path: &Path) -> Result<bool, String> {
+    if tmux_session_exists(name) {
+        return Ok(false);
+    }
+    let out = Command::new("tmux")
+        .args(["new-session", "-d", "-s", name, "-c", path.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("Failed to run tmux: {e}"))?;
+
+    if !out.status.success() {
+        return Err(format!(
+            "Failed to create tmux session:\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(true)
+}
+
 /// Create the tmux session (detached) if it doesn't already exist, then switch to it.
 /// No-ops silently if not inside tmux or if tmux is not available.
 fn ensure_and_switch_tmux_session(name: &str, path: &Path) -> Result<(), String> {
@@ -419,19 +441,7 @@ fn ensure_and_switch_tmux_session(name: &str, path: &Path) -> Result<(), String>
         return Ok(());
     }
 
-    if !tmux_session_exists(name) {
-        let out = Command::new("tmux")
-            .args(["new-session", "-d", "-s", name, "-c", path.to_str().unwrap()])
-            .output()
-            .map_err(|e| format!("Failed to run tmux: {e}"))?;
-
-        if !out.status.success() {
-            return Err(format!(
-                "Failed to create tmux session:\n{}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-    }
+    ensure_tmux_session(name, path)?;
 
     let out = Command::new("tmux")
         .args(["switch-client", "-t", name])
@@ -712,6 +722,51 @@ fn handle_tmux_switch(repo_name: &str, branch: &str, path: &Path, no_session: bo
     }
 }
 
+fn run_sessions() {
+    let cfg = read_global_config();
+    if cfg.repos.is_empty() {
+        die("No repos configured in ~/.config/wt/config.toml");
+    }
+
+    let mut created = 0usize;
+    let mut existed = 0usize;
+    let mut total = 0usize;
+
+    for repo_path_str in &cfg.repos {
+        let repo_path = expand_tilde(repo_path_str);
+        let repo_name = repo_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo")
+            .to_string();
+
+        let worktrees = match list_worktrees(&repo_path) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Warning: {}: {e}", repo_path.display());
+                continue;
+            }
+        };
+
+        for w in worktrees {
+            total += 1;
+            let session = tmux_session_name(&repo_name, &w.branch);
+            match ensure_tmux_session(&session, &w.path) {
+                Ok(true) => {
+                    eprintln!("Created: {session}");
+                    created += 1;
+                }
+                Ok(false) => {
+                    existed += 1;
+                }
+                Err(e) => eprintln!("Warning: {session}: {e}"),
+            }
+        }
+    }
+
+    eprintln!("Done. {total} worktrees, {created} created, {existed} already existed.");
+}
+
 fn run_global_mode(no_session: bool) {
     let cfg = read_global_config();
     if cfg.repos.is_empty() {
@@ -806,6 +861,11 @@ wt() {{
         return;
     }
 
+    if matches!(cli.command, Some(Commands::Sessions)) {
+        run_sessions();
+        return;
+    }
+
     let main_repo = match get_main_repo_root() {
         Ok(p) => p,
         Err(e) => {
@@ -849,6 +909,7 @@ wt() {{
             }
             return;
         }
+        Some(Commands::Sessions) => unreachable!("handled before main_repo lookup"),
         None => {}
     }
 
