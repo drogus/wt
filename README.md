@@ -2,6 +2,8 @@
 
 A git worktree manager with tmux integration and fuzzy search.
 
+![wt demo](assets/demo.gif)
+
 `wt` organizes worktrees in a sibling directory next to your main repo
 (e.g. `myproject-worktrees/`) and optionally manages a tmux session per
 worktree so each branch gets its own terminal workspace.
