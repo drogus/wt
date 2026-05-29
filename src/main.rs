@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use fuzzy_matcher::FuzzyMatcher;
@@ -17,6 +18,8 @@ struct WtConfig {
 struct GlobalConfig {
     #[serde(default)]
     repos: Vec<String>,
+    #[serde(default)]
+    archive_dir: Option<String>,
 }
 
 fn global_config_path() -> Option<PathBuf> {
@@ -505,6 +508,90 @@ fn kill_tmux_session(name: &str) {
         .status();
 }
 
+/// Copy a worktree into the archive directory as a standalone backup before it is
+/// destroyed. When possible the backup is a self-contained git repo (its own object
+/// store), so it keeps working after the original branch is deleted; otherwise it falls
+/// back to a plain recursive copy. Returns the path of the created archive.
+fn archive_worktree(
+    main_repo: &Path,
+    archive_dir: &Path,
+    repo_name: &str,
+    branch: &str,
+    worktree_path: &Path,
+) -> Result<PathBuf, String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = archive_dir.join(format!("{repo_name}-{}-{stamp}", branch_to_dir_name(branch)));
+
+    std::fs::create_dir_all(archive_dir)
+        .map_err(|e| format!("could not create archive dir {}: {e}", archive_dir.display()))?;
+    if dest.exists() {
+        return Err(format!("archive target already exists: {}", dest.display()));
+    }
+
+    if let Err(e) = archive_with_git(main_repo, branch, worktree_path, &dest) {
+        eprintln!("Warning: could not create git-backed archive ({e}); using plain copy.");
+        let _ = std::fs::remove_dir_all(&dest);
+        archive_plain_copy(worktree_path, &dest)?;
+    }
+
+    Ok(dest)
+}
+
+/// Build a standalone git repo at `dest`: clone the branch for its history (with its own
+/// object store via `--no-hardlinks`), then mirror the worktree's working tree over it —
+/// including uncommitted, untracked, and git-ignored files — keeping the cloned `.git`.
+fn archive_with_git(
+    main_repo: &Path,
+    branch: &str,
+    worktree_path: &Path,
+    dest: &Path,
+) -> Result<(), String> {
+    let out = Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            "--single-branch",
+            "--branch",
+            branch,
+            main_repo.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+
+    let src = format!("{}/", worktree_path.display());
+    let out = Command::new("rsync")
+        .args(["-a", "--delete", "--exclude=/.git", &src, dest.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("failed to run rsync: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+
+    Ok(())
+}
+
+/// Fallback archive: a plain recursive copy of the whole worktree. The copied `.git` is a
+/// dangling gitlink once the worktree is removed, so drop it.
+fn archive_plain_copy(worktree_path: &Path, dest: &Path) -> Result<(), String> {
+    let out = Command::new("cp")
+        .args(["-R", worktree_path.to_str().unwrap(), dest.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("failed to run cp: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let _ = std::fs::remove_file(dest.join(".git"));
+    Ok(())
+}
+
 fn destroy_worktree(
     main_repo: &Path,
     repo_name: &str,
@@ -529,6 +616,17 @@ fn destroy_worktree(
     } else {
         false
     };
+
+    // 0. Archive the worktree first if configured, so destroy cannot lose work.
+    if worktree_path.exists() {
+        if let Some(dir) = read_global_config().archive_dir.as_deref() {
+            let archive_dir = expand_tilde(dir);
+            match archive_worktree(main_repo, &archive_dir, repo_name, branch, &worktree_path) {
+                Ok(dest) => eprintln!("Archived worktree to {}", dest.display()),
+                Err(e) => return Err(format!("archive failed, worktree not destroyed: {e}")),
+            }
+        }
+    }
 
     // 1. Remove the worktree directory.
     if worktree_path.exists() {
