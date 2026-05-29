@@ -734,6 +734,24 @@ fn get_current_branch() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// The branch currently checked out at `repo`, or None if HEAD is detached.
+fn current_branch_at(repo: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
 fn rename_worktree(
     main_repo: &Path,
     repo_name: &str,
@@ -945,6 +963,20 @@ fn run_global_mode(no_session: bool) {
     }
 }
 
+/// Whether the shell's current directory is inside `worktree_path`. Used to decide if we
+/// should tell the shell wrapper to `cd` to the main repo after removing the worktree the
+/// user is standing in — otherwise the shell is stranded in a deleted directory. Must be
+/// called before the worktree is removed.
+fn cwd_is_inside(worktree_path: &Path) -> bool {
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    match (cwd.canonicalize(), worktree_path.canonicalize()) {
+        (Ok(cwd), Ok(wt)) => cwd.starts_with(wt),
+        _ => cwd.starts_with(worktree_path),
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1023,8 +1055,15 @@ wt() {{
                 Some(b) => b,
                 None => get_current_branch().unwrap_or_else(|e| die(&e)),
             };
+            let worktree_path = get_worktrees_dir(&main_repo).join(branch_to_dir_name(&branch));
+            let was_inside = cwd_is_inside(&worktree_path);
             match destroy_worktree(&main_repo, &repo_name, &branch, cli.no_session) {
-                Ok(()) => eprintln!("Destroyed '{branch}'."),
+                Ok(()) => {
+                    eprintln!("Destroyed '{branch}'.");
+                    if was_inside && (cli.no_session || !is_in_tmux()) {
+                        println!("{}", main_repo.display());
+                    }
+                }
                 Err(e) => die(&e),
             }
             return;
@@ -1107,12 +1146,16 @@ wt() {{
                 .unwrap_or_else(|e| die(&format!("archive failed, worktree not removed: {e}")));
         }
 
+        let was_inside = cwd_is_inside(&wt.path);
         match force_remove_worktree(&main_repo, &wt.path, force) {
             Ok(()) => {
                 if !cli.no_session {
                     kill_tmux_session(&tmux_session_name(&repo_name, branch));
                 }
                 eprintln!("Removed worktree for branch '{branch}'.");
+                if was_inside && (cli.no_session || !is_in_tmux()) {
+                    println!("{}", main_repo.display());
+                }
             }
             Err(e) => die(&e),
         }
@@ -1149,23 +1192,33 @@ wt() {{
             }
         }
     } else {
-        // No args: interactive list with fuzzy search.
+        // No args: interactive list with fuzzy search, with the main repo at the top.
         let worktrees = list_worktrees(&main_repo).unwrap_or_else(|e| die(&e));
 
-        if worktrees.is_empty() {
-            die("No worktrees found. Use -c <branch> to create one.");
-        }
+        let main_branch = current_branch_at(&main_repo);
+        let main_label = main_branch
+            .clone()
+            .unwrap_or_else(|| "(main repo)".to_string());
 
-        let options: Vec<String> = worktrees.iter().map(|w| w.branch.clone()).collect();
+        let mut options: Vec<String> = vec![main_label.clone()];
+        options.extend(worktrees.iter().map(|w| w.branch.clone()));
 
         let selected = Select::new("Select a worktree:", options)
             .with_scorer(&fuzzy_scorer)
             .prompt();
 
         match selected {
-            Ok(branch) => {
-                if let Some(wt) = worktrees.iter().find(|w| w.branch == branch) {
-                    if !handle_tmux(&branch, &wt.path) {
+            Ok(choice) => {
+                if choice == main_label {
+                    let switched = match &main_branch {
+                        Some(b) => handle_tmux(b, &main_repo),
+                        None => false,
+                    };
+                    if !switched {
+                        println!("{}", main_repo.display());
+                    }
+                } else if let Some(wt) = worktrees.iter().find(|w| w.branch == choice) {
+                    if !handle_tmux(&choice, &wt.path) {
                         println!("{}", wt.path.display());
                     }
                 }

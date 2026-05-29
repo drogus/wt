@@ -89,12 +89,27 @@ session. Defaults to the current branch if `--from` is not specified.
 wt destroy my-feature
 ```
 
-Removes the worktree, deletes the local branch, deletes the remote branch
-(if it exists), and kills the tmux session. Defaults to the current branch
-if no argument is given.
+Does everything `wt -r` does, and **also deletes the branch**: removes the
+worktree, deletes the local branch, deletes the remote branch (if it exists),
+and kills the tmux session. Defaults to the current branch if no argument is
+given.
 
 If `archive_dir` is set in the global config, the worktree is copied there as a
 standalone backup before it is destroyed (see [Configuration](#configuration)).
+
+### `wt -r` vs `wt destroy`
+
+|                               | `wt -r` | `wt destroy` |
+| ----------------------------- | ------- | ------------ |
+| Worktree directory            | removed | removed      |
+| tmux session                  | killed  | killed       |
+| Local branch                  | kept    | deleted      |
+| Remote branch                 | kept    | deleted      |
+| Backup (if `archive_dir` set) | yes     | yes          |
+| Submodule-safe removal        | yes     | yes          |
+
+Use `wt -r` to free up a checkout while keeping the branch; use `wt destroy`
+to tear the branch down everywhere.
 
 Run `wt --help` for the full list of options.
 
@@ -110,13 +125,14 @@ repos = ["~/code/myproject", "~/code/other"]
 archive_dir = "~/wt-archive"
 ```
 
-When `archive_dir` is set, each `wt destroy` writes a backup to
-`<archive_dir>/<repo>-<branch>-<timestamp>`. The backup is a self-contained git
-repository: the branch history is cloned into its own object store (so it keeps
-working after the original branch is deleted) and the live working tree —
-including uncommitted, untracked, and git-ignored files — is mirrored on top. If
-git or rsync are unavailable it falls back to a plain recursive copy. If the
-backup cannot be written, the worktree is left intact. `~` is expanded.
+When `archive_dir` is set, `wt destroy` and `wt -r` write a backup to
+`<archive_dir>/<repo>-<branch>-<timestamp>` before removing the worktree. The
+backup is a self-contained git repository: the branch history is cloned into its
+own object store (so it keeps working after the original branch is deleted) and
+the live working tree — including uncommitted, untracked, and git-ignored files
+— is mirrored on top. If git or rsync are unavailable it falls back to a plain
+recursive copy. If the backup cannot be written, the worktree is left intact.
+`~` is expanded.
 
 ### Per-repo config — `.wt.toml`
 
