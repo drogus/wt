@@ -374,28 +374,22 @@ fn create_worktree(main_repo: &Path, branch: &str, base: &str) -> Result<PathBuf
     }
 }
 
-fn remove_worktree(main_repo: &Path, worktree: &Worktree, force: bool) -> Result<(), String> {
-    let path_str = worktree.path.to_str().unwrap();
-    let mut args = vec!["worktree", "remove"];
-    if force {
-        args.push("--force");
-    }
-    args.push(path_str);
-
-    let output = Command::new("git")
-        .args(&args)
-        .current_dir(main_repo)
-        .output()
-        .map_err(|e| format!("Failed to run git: {e}"))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Failed to remove worktree:\n{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
+/// Archive the worktree to the configured `archive_dir`, if one is set, before it is
+/// removed. Returns Err if archiving was attempted and failed, so the caller can abort
+/// without deleting anything. Shared by `wt destroy` and `wt -r`.
+fn maybe_archive_worktree(
+    main_repo: &Path,
+    repo_name: &str,
+    branch: &str,
+    worktree_path: &Path,
+) -> Result<(), String> {
+    let Some(dir) = read_global_config().archive_dir else {
+        return Ok(());
+    };
+    let archive_dir = expand_tilde(&dir);
+    let dest = archive_worktree(main_repo, &archive_dir, repo_name, branch, worktree_path)?;
+    eprintln!("Archived worktree to {}", dest.display());
+    Ok(())
 }
 
 fn tmux_session_name(repo_name: &str, branch: &str) -> String {
@@ -592,6 +586,55 @@ fn archive_plain_copy(worktree_path: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove a worktree via git, falling back to deleting the directory ourselves and
+/// pruning git's bookkeeping when git refuses. This happens, for example, when the
+/// worktree's index has a tracked submodule gitlink: `git worktree remove` aborts and
+/// neither `--force` nor deinitializing the submodule gets past it.
+fn force_remove_worktree(main_repo: &Path, worktree_path: &Path, force: bool) -> Result<(), String> {
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(worktree_path.to_str().unwrap());
+
+    let out = Command::new("git")
+        .args(&args)
+        .current_dir(main_repo)
+        .output()
+        .map_err(|e| format!("Failed to run git: {e}"))?;
+
+    if out.status.success() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "Warning: `git worktree remove` failed ({}); removing the directory manually and pruning.",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+
+    std::fs::remove_dir_all(worktree_path).map_err(|e| {
+        format!(
+            "Failed to delete worktree directory {}: {e}",
+            worktree_path.display()
+        )
+    })?;
+
+    let prune = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(main_repo)
+        .output()
+        .map_err(|e| format!("Failed to run git: {e}"))?;
+
+    if !prune.status.success() {
+        return Err(format!(
+            "Removed the directory but `git worktree prune` failed:\n{}",
+            String::from_utf8_lossy(&prune.stderr).trim()
+        ));
+    }
+
+    Ok(())
+}
+
 fn destroy_worktree(
     main_repo: &Path,
     repo_name: &str,
@@ -619,35 +662,13 @@ fn destroy_worktree(
 
     // 0. Archive the worktree first if configured, so destroy cannot lose work.
     if worktree_path.exists() {
-        if let Some(dir) = read_global_config().archive_dir.as_deref() {
-            let archive_dir = expand_tilde(dir);
-            match archive_worktree(main_repo, &archive_dir, repo_name, branch, &worktree_path) {
-                Ok(dest) => eprintln!("Archived worktree to {}", dest.display()),
-                Err(e) => return Err(format!("archive failed, worktree not destroyed: {e}")),
-            }
-        }
+        maybe_archive_worktree(main_repo, repo_name, branch, &worktree_path)
+            .map_err(|e| format!("archive failed, worktree not destroyed: {e}"))?;
     }
 
     // 1. Remove the worktree directory.
     if worktree_path.exists() {
-        let mut args = vec!["worktree", "remove"];
-        if force {
-            args.push("--force");
-        }
-        args.push(worktree_path.to_str().unwrap());
-
-        let out = Command::new("git")
-            .args(&args)
-            .current_dir(main_repo)
-            .output()
-            .map_err(|e| format!("Failed to run git: {e}"))?;
-
-        if !out.status.success() {
-            return Err(format!(
-                "Failed to remove worktree:\n{}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
+        force_remove_worktree(main_repo, &worktree_path, force)?;
     }
 
     // 2. Delete the local branch.
@@ -1081,7 +1102,12 @@ wt() {{
             false
         };
 
-        match remove_worktree(&main_repo, wt, force) {
+        if wt.path.exists() {
+            maybe_archive_worktree(&main_repo, &repo_name, branch, &wt.path)
+                .unwrap_or_else(|e| die(&format!("archive failed, worktree not removed: {e}")));
+        }
+
+        match force_remove_worktree(&main_repo, &wt.path, force) {
             Ok(()) => {
                 if !cli.no_session {
                     kill_tmux_session(&tmux_session_name(&repo_name, branch));

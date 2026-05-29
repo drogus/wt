@@ -66,8 +66,12 @@ wt -c my-feature -b origin/develop
 wt -r my-feature
 ```
 
-Removes the worktree directory and kills the associated tmux session. Prompts
-for confirmation if there are uncommitted changes.
+Removes the worktree directory and kills the associated tmux session, but
+**keeps the branch** (local and remote) intact. Prompts for confirmation if
+there are uncommitted changes.
+
+If `archive_dir` is set, the worktree is backed up before removal (see
+[Configuration](#configuration)).
 
 ### Rename a branch and its worktree
 
