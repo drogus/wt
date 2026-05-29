@@ -406,8 +406,9 @@ fn is_in_tmux() -> bool {
 }
 
 fn tmux_session_exists(name: &str) -> bool {
+    let exact = format!("={name}");
     Command::new("tmux")
-        .args(["has-session", "-t", name])
+        .args(["has-session", "-t", &exact])
         .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
